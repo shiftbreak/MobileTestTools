@@ -5,7 +5,7 @@ e="installipa -i ${1}"
 c=`ssh -i ~/.ssh/id_rsa -p 2222 root@localhost "installipa -l 2>/dev/null"`
 package="NULL"
 for l in `echo $c`; do
-	if echo $l | grep -iqF $1; then
+	if echo $l | grep -iqF "$1"; then
 		package=$l
 	fi
 done

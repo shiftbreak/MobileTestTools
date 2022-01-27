@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import sqlite3
+import tempfile
+
 import magic
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import argparse
 import json
 import pprint
 from BinaryCookieReader import process
+import sqlite3
 
 permissions = {
     "NSPhotoLibraryAddUsageDescription": "Your app adds photos to the user's photo library",
@@ -127,7 +130,7 @@ def do_plist(f, binary=False):
         print(e)
 
 
-def decode_keychain(f_in):
+def decode_keychain(f_in, entitlement_filter=None):
     k = json.load(open(f_in))
     for l in k:
         i_out = []
@@ -139,6 +142,13 @@ def decode_keychain(f_in):
                     l[i] = formatData(decoded)
                 except:
                     l[i] = formatData(decoded)
+    
+    if entitlement_filter is not None:
+        new_k = []
+        for l in k:
+            if entitlement_filter in l['entitlement_group']:
+                new_k.append(l)
+        k = new_k
     print(formatData(k))
 
 
@@ -157,19 +167,65 @@ def weak_keychain(f_in):
             print(formatData(l))
 
 
+def backup(dest_folder):
+    udid = os.popen("ideviceinfo --simple | grep UniqueDeviceID | sed 's/.* //'").read().strip()
+    print(f"UDID: {udid}")
+    os.system(f"idevicebackup2 backup --full --source {udid} --udid {udid} {dest_folder}")
+
+
+def proc_backups(search_term, out_dir, in_dir):
+    db_name = None
+    base_dir = None
+    for root, dirs, files in os.walk(in_dir):
+        for file in files:
+            if "Manifest.db" == file:
+                db_name = os.path.join(root, file)
+                base_dir = root
+    if db_name:
+        conn = sqlite3.connect(db_name)
+        c = conn.cursor()
+
+        files = {}
+        result = c.execute(f"SELECT fileID, relativePath FROM Files WHERE domain LIKE  '%{search_term}%';")
+        for row in result:
+            files[row[0]] = row[1]
+
+        for root, dirs, nfiles in os.walk(os.path.join(in_dir, base_dir)):
+            for file in nfiles:
+
+                if file in files.keys():
+                    full_filename = os.path.join(root, file)
+                    data = open(full_filename, 'r+b').read()
+
+                    realname = files[file]
+                    print(f"Found file: {realname}")
+                    new_file = os.path.join(out_dir, realname)
+                    os.makedirs(os.path.dirname(new_file), exist_ok=True)
+                    f = open(new_file, 'w+b')
+                    f.write(data)
+                    f.close()
+
+    input("pause")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='IOS and Android data processor (by Shiftbreak)')
 
-    parser.add_argument('-d', '--directory', dest='directory', help='Specify name of the directory to parse')
+    parser.add_argument('-d', '--directory', dest='directory', required=True, help='Specify name of the directory to parse')
     parser.add_argument('-s', '--list-sqlite', action='store_true', dest='list_sqlite', help='List SQLite Databases.')
     parser.add_argument('-S', '--sqlite', action='store_true', dest='do_sqlite', help='Process SQLite Databases.')
-    parser.add_argument('-B', '--binarycookies', action='store_true', dest='do_bincook', help='Process BinaryCookies.')
+    parser.add_argument('-C', '--binarycookies', action='store_true', dest='do_bincook', help='Process BinaryCookies.')
+    parser.add_argument('-b', '--backup', dest='backup_folder', help='Extract and rename backups [required idevicebackup2 to be on the $PATH')
+    parser.add_argument('-B', '--proc-backup', dest="procbackups", nargs=2, metavar=('backup_dir', 'search_term'),
+                        help='Extract and rename backups based on search term')
+    parser.add_argument('-o', '--output', dest='out_dir',
+                        help='Output directory')
     parser.add_argument('-p', '--list-plist', action='store_true', dest='list_plist', help='List Binary and non-binary plists.')
     parser.add_argument('-P', '--plist', action='store_true', dest='do_plist', help='Process Binary and non-binary plists.')
     parser.add_argument('-i', '--image', action='store_true', dest='do_image', help='List images.')
     parser.add_argument('-k',  '--keychain', dest='keychain', help='Decode JSON Keychain dump drom objection.')
     parser.add_argument('-K',  '--weak-keychain', dest='keychain2', help='Print Keychain items which use weak protection')
-
+    parser.add_argument('-f',  '--filter', dest='filter', help='Filter action')
     parser.add_argument('-m', '--list-mime', action='store_true', dest='do_mime', help='List Mime Types for all files.')
     parser.add_argument('-u', '--unique-mime', action='store_true', dest='do_umime', help='List Unique mime types')
     parser.add_argument('-z',  '--info-plist', dest='info_plist', help='Get Info.Plist permissions.')
@@ -177,7 +233,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.keychain:
-        decode_keychain(args.keychain)
+        if args.filter:
+            decode_keychain(args.keychain, entitlement_filter=args.filter)
+        else:
+            decode_keychain(args.keychain)
         exit(0)
 
     if args.keychain2:
@@ -201,10 +260,18 @@ if __name__ == '__main__':
             print(m)
         exit(0)
 
+    if args.backup_folder:
+        backup(args.backup_folder)
+
+    if args.procbackups:
+        if not args.out_dir:
+            sys.exit("This option also requires an output directory [-o out_dir]")
+        backup_dir,  search_term = args.procbackups
+        proc_backups(search_term, args.out_dir, backup_dir)
 
     for f in result:
         if not os.path.isdir(f):
-            b = open(f,"rb").read(2048)
+            b = open(f, "rb").read(2048)
             m = magic.from_buffer(b, mime=True)
             m2 = magic.from_buffer(b, mime=False)
             if args.do_sqlite and m == 'application/x-sqlite3':
@@ -232,3 +299,5 @@ if __name__ == '__main__':
             if args.do_bincook:
                 if "Cookies.binarycookies" in str(f):
                     process(f)
+
+
